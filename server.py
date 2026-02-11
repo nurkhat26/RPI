@@ -1,24 +1,19 @@
 import json
 import os
-import threading
+import time
 import meshtastic.serial_interface
 from pubsub import pub
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    MessageHandler,
-    CommandHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
 import asyncio
 
 # ================= CONFIG =================
-BOT_TOKEN = "8189587706:AAFAseLVM15EmQwyBcSBIBIurmsVi2lvEcY"  # Replace with your Telegram bot token
+BOT_TOKEN = "8189587706:AAFAseLVM15EmQwyBcSBIBIurmsVi2lvEcY"  # Telegram bot token
 CHAT_FILE = "chats.json"
+SERIAL_PORT = None  # e.g., "/dev/ttyUSB0" or None for auto-detect
 # ==========================================
 
-# -------- Chat Storage --------
+# -------- Load chats --------
 if os.path.exists(CHAT_FILE):
     with open(CHAT_FILE, "r") as f:
         known_chats = set(json.load(f))
@@ -33,12 +28,16 @@ def save_chats():
 
 # -------- Connect to Meshtastic --------
 print("Connecting to Meshtastic...")
-interface = meshtastic.serial_interface.SerialInterface()
+if SERIAL_PORT:
+    interface = meshtastic.serial_interface.SerialInterface(SERIAL_PORT)
+else:
+    interface = meshtastic.serial_interface.SerialInterface()
+time.sleep(1)
 print("Connected to Meshtastic")
 
-# -------- Global Asyncio Loop --------
-async_loop = asyncio.new_event_loop()
-asyncio.set_event_loop(async_loop)
+
+# -------- Telegram Application --------
+telegram_app = None  # will be set in main()
 
 
 # -------- MESHTASTIC → TELEGRAM --------
@@ -51,19 +50,15 @@ def on_receive(packet, interface):
             return
 
         text = decoded["text"]
-        sender = packet.get("fromId", "Unknown")
-
-        # Prevent loops
         if text.startswith("[TG] "):
             return
-
+        sender = packet.get("fromId", "Unknown")
         message = f"📡 {sender}:\n{text}"
 
-        # Schedule sending to all chats in main asyncio loop
         for chat_id in known_chats:
             asyncio.run_coroutine_threadsafe(
                 telegram_app.bot.send_message(chat_id=chat_id, text=message),
-                async_loop,
+                asyncio.get_event_loop()
             )
 
     except Exception as e:
@@ -78,7 +73,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = update.message.text
 
-    # Save new chat automatically
     if chat_id not in known_chats:
         known_chats.add(chat_id)
         save_chats()
@@ -98,25 +92,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Meshtastic bridge connected ✅")
 
 
-# -------- RUN TELEGRAM APP --------
-def run_telegram():
+# -------- MAIN --------
+async def main():
     global telegram_app
-    telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("Telegram bridge running...")
-    telegram_app.run_polling()
+    print("Bridge running...")
+    await telegram_app.run_polling()
 
 
-# -------- MAIN --------
 if __name__ == "__main__":
-    # Start Telegram in main thread
-    threading.Thread(target=run_telegram, daemon=True).start()
-
-    # Run asyncio loop forever to schedule Meshtastic tasks
-    try:
-        async_loop.run_forever()
-    except KeyboardInterrupt:
-        print("Shutting down...")
+    asyncio.run(main())
